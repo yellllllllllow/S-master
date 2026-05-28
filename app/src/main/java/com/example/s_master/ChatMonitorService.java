@@ -135,6 +135,8 @@ public class ChatMonitorService extends Service {
             contentText = "点击「📷」分析当前屏幕（" + modeLabel + "）";
         }
 
+        boolean hasResult = !lastResultText.isEmpty();
+
         PendingIntent openPi = PendingIntent.getBroadcast(this, 5,
                 new Intent(ACTION_OPEN_APP).setPackage(getPackageName()),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
@@ -159,14 +161,10 @@ public class ChatMonitorService extends Service {
                 .setContentText(contentText)
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setOngoing(true)
-                .setContentIntent(openPi)
+                .setContentIntent(hasResult ? copyPi : openPi)
                 .setShowWhen(true)
                 .addAction(android.R.drawable.ic_menu_camera, "📷 分析", capturePi)
                 .addAction(android.R.drawable.ic_menu_sort_by_size, "🔄 " + modeLabel, togglePi);
-
-        if (!lastResultText.isEmpty()) {
-            builder.addAction(android.R.drawable.ic_menu_edit, "📋 复制", copyPi);
-        }
 
         builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "⏹ 停止", stopPi);
 
