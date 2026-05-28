@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="purple_500">#3366FF</color>
+    <color name="purple_700">#2952CC</color>
+    <color name="teal_200">#00C9A7</color>
+    <color name="teal_700">#00A386</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="green">#3366FF</color>
+    <color name="red">#F44336</color>
+    <color name="btn_start">#3366FF</color>
+    <color name="btn_end">#2952CC</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="background_light">#F2F4F8</color>
+    <color name="text_primary">#1A1A2E</color>
+    <color name="text_secondary">#6B7280</color>
+    <color name="text_hint">#9CA3AF</color>
+    <color name="card_border">#E8ECF2</color>
+    <color name="accent_green">#3366FF</color>
+    <color name="accent_orange">#FF9800</color>
+    <color name="toolbar_bg">#FFFFFF</color>
+    <color name="vivo_blue">#3366FF</color>
+    <color name="vivo_teal">#00C9A7</color>
+    <color name="vivo_light_bg">#EEF1F8</color>
+</resources>
