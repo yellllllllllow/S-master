@@ -48,6 +48,11 @@ public class MainActivity extends AppCompatActivity {
 
     private List<String> visionModels = new ArrayList<>();
     private List<String> textModels = new ArrayList<>();
+    
+    private TextView visionModelName, textModelName;
+    private View visionStatusDot, textStatusDot;
+    private TextView visionStatusText, textStatusText;
+    private TextView modelStatusText;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -67,6 +72,9 @@ public class MainActivity extends AppCompatActivity {
         stopBtn.setOnClickListener(v -> stopService());
 
         findViewById(R.id.settings_btn).setOnClickListener(v -> showSettingsSheet());
+        
+        initModelStatusViews();
+        loadSavedModelStatus();
         
         requestScreenCapture();
     }
@@ -236,11 +244,13 @@ public class MainActivity extends AppCompatActivity {
             String shortModel = model.length() > 20 ? model.substring(0, 20) + "..." : model;
             testVisionBtn.setText("⏳ 测试: " + shortModel);
             testVisionBtn.setEnabled(false);
+            setVisionModelStatus(model, "testing");
             aiService.testModel(model, true, new AIService.AiCallback() {
                 @Override
                 public void onResult(String analysis, String suggestion) {
                     runOnUiThread(() -> {
                         testVisionBtn.setText("✅ " + shortModel);
+                        setVisionModelStatus(model, "success");
                         Toast.makeText(MainActivity.this, "图形模型测试通过: " + model, Toast.LENGTH_SHORT).show();
                         new android.os.Handler().postDelayed(() -> {
                             testVisionBtn.setText("▶ 测试图形模型");
@@ -252,6 +262,7 @@ public class MainActivity extends AppCompatActivity {
                 public void onError(String error) {
                     runOnUiThread(() -> {
                         testVisionBtn.setText("❌ " + shortModel);
+                        setVisionModelStatus(model, "failed");
                         new android.os.Handler().postDelayed(() -> {
                             testVisionBtn.setText("▶ 测试图形模型");
                             testVisionBtn.setEnabled(true);
@@ -271,11 +282,13 @@ public class MainActivity extends AppCompatActivity {
             String shortModel = model.length() > 20 ? model.substring(0, 20) + "..." : model;
             testTextBtn.setText("⏳ 测试: " + shortModel);
             testTextBtn.setEnabled(false);
+            setTextModelStatus(model, "testing");
             aiService.testModel(model, false, new AIService.AiCallback() {
                 @Override
                 public void onResult(String analysis, String suggestion) {
                     runOnUiThread(() -> {
                         testTextBtn.setText("✅ " + shortModel);
+                        setTextModelStatus(model, "success");
                         Toast.makeText(MainActivity.this, "推理模型测试通过: " + model, Toast.LENGTH_SHORT).show();
                         new android.os.Handler().postDelayed(() -> {
                             testTextBtn.setText("▶ 测试推理模型");
@@ -287,6 +300,7 @@ public class MainActivity extends AppCompatActivity {
                 public void onError(String error) {
                     runOnUiThread(() -> {
                         testTextBtn.setText("❌ " + shortModel);
+                        setTextModelStatus(model, "failed");
                         new android.os.Handler().postDelayed(() -> {
                             testTextBtn.setText("▶ 测试推理模型");
                             testTextBtn.setEnabled(true);
@@ -500,6 +514,100 @@ public class MainActivity extends AppCompatActivity {
                 Intent floatIntent = new Intent(this, FloatingService.class);
                 startService(floatIntent);
             }
+        }
+    }
+
+    private void initModelStatusViews() {
+        visionModelName = findViewById(R.id.vision_model_name);
+        textModelName = findViewById(R.id.text_model_name);
+        visionStatusDot = findViewById(R.id.vision_status_dot);
+        textStatusDot = findViewById(R.id.text_status_dot);
+        visionStatusText = findViewById(R.id.vision_status_text);
+        textStatusText = findViewById(R.id.text_status_text);
+        modelStatusText = findViewById(R.id.model_status_text);
+        
+        findViewById(R.id.vision_model_card).setOnClickListener(v -> showSettingsSheet());
+        findViewById(R.id.text_model_card).setOnClickListener(v -> showSettingsSheet());
+    }
+
+    private void loadSavedModelStatus() {
+        String visionModel = aiService.getVisionModel();
+        String textModel = aiService.getReasoningModel();
+        
+        visionModelName.setText(visionModel.isEmpty() ? "未选择" : visionModel);
+        textModelName.setText(textModel.isEmpty() ? "未选择" : textModel);
+        
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String visionStatus = prefs.getString("vision_model_status", "untested");
+        String textStatus = prefs.getString("text_model_status", "untested");
+        
+        updateModelStatus(visionStatusDot, visionStatusText, visionStatus);
+        updateModelStatus(textStatusDot, textStatusText, textStatus);
+        updateOverallStatus();
+    }
+
+    private void updateModelStatus(View dot, TextView text, String status) {
+        switch (status) {
+            case "success":
+                dot.setBackgroundResource(R.drawable.dot_green);
+                text.setText("✓ 测试通过");
+                text.setTextColor(getResources().getColor(R.color.green_500));
+                break;
+            case "testing":
+                dot.setBackgroundResource(R.drawable.dot_yellow);
+                text.setText("⏳ 测试中");
+                text.setTextColor(getResources().getColor(R.color.yellow_500));
+                break;
+            case "failed":
+                dot.setBackgroundResource(R.drawable.dot_red);
+                text.setText("✗ 测试失败");
+                text.setTextColor(getResources().getColor(R.color.red_500));
+                break;
+            default:
+                dot.setBackgroundResource(R.drawable.dot_grey);
+                text.setText("未测试");
+                text.setTextColor(getResources().getColor(R.color.text_hint));
+        }
+    }
+
+    public void setVisionModelStatus(String modelName, String status) {
+        visionModelName.setText(modelName);
+        updateModelStatus(visionStatusDot, visionStatusText, status);
+        saveModelStatus("vision", modelName, status);
+        updateOverallStatus();
+    }
+
+    public void setTextModelStatus(String modelName, String status) {
+        textModelName.setText(modelName);
+        updateModelStatus(textStatusDot, textStatusText, status);
+        saveModelStatus("text", modelName, status);
+        updateOverallStatus();
+    }
+
+    private void saveModelStatus(String type, String modelName, String status) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit()
+                .putString(type + "_model_name", modelName)
+                .putString(type + "_model_status", status)
+                .apply();
+    }
+
+    private void updateOverallStatus() {
+        String visionStatus = visionStatusText.getText().toString();
+        String textStatus = textStatusText.getText().toString();
+        
+        if (visionStatus.equals("✓ 测试通过") && textStatus.equals("✓ 测试通过")) {
+            modelStatusText.setText("全部通过");
+            modelStatusText.setTextColor(getResources().getColor(R.color.green_500));
+        } else if (visionStatus.equals("⏳ 测试中") || textStatus.equals("⏳ 测试中")) {
+            modelStatusText.setText("测试中");
+            modelStatusText.setTextColor(getResources().getColor(R.color.yellow_500));
+        } else if (visionStatus.equals("✗ 测试失败") || textStatus.equals("✗ 测试失败")) {
+            modelStatusText.setText("部分失败");
+            modelStatusText.setTextColor(getResources().getColor(R.color.red_500));
+        } else {
+            modelStatusText.setText("未测试");
+            modelStatusText.setTextColor(getResources().getColor(R.color.text_hint));
         }
     }
 
