@@ -41,6 +41,11 @@ public class FloatingService extends Service {
 
     private LinearLayout popupView;
     private WindowManager.LayoutParams popupParams;
+    
+    private View dockView;
+    private WindowManager.LayoutParams dockParams;
+    private float dockDownX, dockDownY;
+    private float dockTouchX, dockTouchY;
 
     private float popupDownX, popupDownY;
     private float popupTouchX, popupTouchY;
@@ -90,7 +95,7 @@ public class FloatingService extends Service {
         createNotificationChannel();
         Notification notification = new Notification.Builder(this, "float_channel")
                 .setContentTitle("S master")
-                .setContentText("结果弹窗服务运行中")
+                .setContentText("分析服务运行中")
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setOngoing(true)
                 .build();
@@ -99,15 +104,101 @@ public class FloatingService extends Service {
         registerReceiver(suggestionReceiver,
                 new IntentFilter("com.example.s_master.SUGGESTION"),
                 Context.RECEIVER_NOT_EXPORTED);
+
+        showDock();
     }
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel("float_channel", "结果弹窗",
+            NotificationChannel channel = new NotificationChannel("float_channel", "分析服务",
                     NotificationManager.IMPORTANCE_LOW);
             NotificationManager manager = getSystemService(NotificationManager.class);
             manager.createNotificationChannel(channel);
         }
+    }
+
+    private void showDock() {
+        if (dockView != null) {
+            try {
+                windowManager.removeView(dockView);
+            } catch (Exception e) {}
+        }
+
+        int dockSize = (int)(56 * density);
+        dockView = new View(this);
+        
+        GradientDrawable dockBg = new GradientDrawable();
+        dockBg.setShape(GradientDrawable.OVAL);
+        dockBg.setColors(new int[]{0xFF6EE7B7, 0xFF7DD3FC});
+        dockBg.setGradientType(GradientDrawable.LINEAR_GRADIENT);
+        dockBg.setOrientation(GradientDrawable.Orientation.TL_BR);
+        dockBg.setStroke((int)(2 * density), 0xFFFFFFFF);
+        dockView.setBackground(dockBg);
+
+        LinearLayout container = new LinearLayout(this);
+        container.setLayoutParams(new ViewGroup.LayoutParams(dockSize, dockSize));
+        container.setGravity(Gravity.CENTER);
+        
+        View innerCircle = new View(this);
+        GradientDrawable innerBg = new GradientDrawable();
+        innerBg.setShape(GradientDrawable.OVAL);
+        innerBg.setColor(0xFFFFFFFF);
+        int innerSize = (int)(28 * density);
+        innerCircle.setLayoutParams(new LinearLayout.LayoutParams(innerSize, innerSize));
+        innerCircle.setBackground(innerBg);
+        container.addView(innerCircle);
+        
+        int layoutFlag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_PHONE;
+
+        dockParams = new WindowManager.LayoutParams(
+                dockSize,
+                dockSize,
+                layoutFlag,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+
+        dockParams.gravity = Gravity.TOP | Gravity.LEFT;
+        dockParams.x = screenWidth - dockSize - (int)(20 * density);
+        dockParams.y = screenHeight / 2;
+
+        dockView.setOnTouchListener((v, event) -> {
+            switch (event.getAction()) {
+                case MotionEvent.ACTION_DOWN:
+                    dockDownX = dockParams.x;
+                    dockDownY = dockParams.y;
+                    dockTouchX = event.getRawX();
+                    dockTouchY = event.getRawY();
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    float dx = event.getRawX() - dockTouchX;
+                    float dy = event.getRawY() - dockTouchY;
+                    dockParams.x = Math.max(0, Math.min(screenWidth - dockSize, (int)(dockDownX + dx)));
+                    dockParams.y = Math.max(0, Math.min(screenHeight - dockSize, (int)(dockDownY + dy)));
+                    windowManager.updateViewLayout(dockView, dockParams);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    float clickDist = (float) Math.sqrt(
+                            Math.pow(event.getRawX() - dockTouchX, 2) 
+                            + Math.pow(event.getRawY() - dockTouchY, 2));
+                    if (clickDist < 10) {
+                        triggerCapture();
+                    }
+                    return true;
+            }
+            return false;
+        });
+
+        windowManager.addView(dockView, dockParams);
+    }
+
+    private void triggerCapture() {
+        Intent captureIntent = new Intent("com.example.s_master.CAPTURE_NOW");
+        captureIntent.setPackage(getPackageName());
+        sendBroadcast(captureIntent);
+        isLoading = true;
     }
 
     private void showResultPopup(String suggestion) {
@@ -175,10 +266,8 @@ public class FloatingService extends Service {
                 View.MeasureSpec.makeMeasureSpec(screenHeight, View.MeasureSpec.AT_MOST));
         int popupW = popupView.getMeasuredWidth();
 
-        popupParams.x = screenWidth - popupW - (int)(10 * density);
-
-        int popupH = popupView.getMeasuredHeight();
-        popupParams.y = Math.max(20, (screenHeight - popupH) / 3);
+        popupParams.x = Math.max(0, Math.min(screenWidth - popupW, dockParams.x + (int)(56 * density / 2) - popupW / 2));
+        popupParams.y = Math.max(0, Math.min(screenHeight - popupView.getMeasuredHeight(), dockParams.y - popupView.getMeasuredHeight() / 2));
 
         popupClose.setOnClickListener(v -> hideResultPopup());
 
@@ -329,5 +418,11 @@ public class FloatingService extends Service {
             unregisterReceiver(suggestionReceiver);
         } catch (Exception e) {}
         hideResultPopup();
+        if (dockView != null) {
+            try {
+                windowManager.removeView(dockView);
+            } catch (Exception e) {}
+            dockView = null;
+        }
     }
 }

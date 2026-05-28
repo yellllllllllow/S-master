@@ -67,6 +67,8 @@ public class MainActivity extends AppCompatActivity {
         stopBtn.setOnClickListener(v -> stopService());
 
         findViewById(R.id.settings_btn).setOnClickListener(v -> showSettingsSheet());
+        
+        requestScreenCapture();
     }
 
     @Override
@@ -409,6 +411,14 @@ public class MainActivity extends AppCompatActivity {
             manual.setTextColor(getResources().getColor(R.color.white));
             realtime.setBackgroundTintList(ColorStateList.valueOf(blue));
             realtime.setTextColor(getResources().getColor(R.color.white));
+        }
+    }
+
+    private void requestScreenCapture() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            startActivityForResult(intent, REQUEST_OVERLAY_PERMISSION);
         }
     }
 
