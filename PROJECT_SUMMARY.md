@@ -27,7 +27,7 @@
 | minSdk | 26 (Android 8.0) |
 | targetSdk | 34 (Android 14) |
 | compileSdk | 34 |
-| 版本 | 2.0 (versionCode 2) |
+| 版本 | 0.1 (versionCode 1) |
 | Gradle | 8.5 |
 | AGP | 8.2.2 |
 | JDK | 11 |
