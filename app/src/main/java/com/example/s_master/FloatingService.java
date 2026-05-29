@@ -14,7 +14,6 @@ import android.content.SharedPreferences;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.util.DisplayMetrics;
@@ -51,12 +50,9 @@ public class FloatingService extends Service {
     private float dockDownX, dockDownY;
     private float dockTouchX, dockTouchY;
     private boolean isDragging = false;
-    private android.view.GestureDetector gestureDetector;
 
     private float popupDownX, popupDownY;
     private float popupTouchX, popupTouchY;
-    private boolean isLoading = false;
-    private boolean popupShowing = false;
     private String lastSuggestion = "";
     private Handler autoHideHandler = new Handler();
     private Runnable autoHideRunnable = this::hideResultPopup;
@@ -68,7 +64,6 @@ public class FloatingService extends Service {
                 String suggestion = intent.getStringExtra("suggestion");
                 if (suggestion != null) {
                     lastSuggestion = suggestion;
-                    isLoading = false;
 
                     boolean silentMode = getSharedPreferences("S_masterPrefs", MODE_PRIVATE)
                             .getBoolean("silent_mode", false);
@@ -128,12 +123,9 @@ public class FloatingService extends Service {
     }
 
     private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel("float_channel", "分析服务",
-                    NotificationManager.IMPORTANCE_LOW);
-            NotificationManager manager = getSystemService(NotificationManager.class);
-            manager.createNotificationChannel(channel);
-        }
+        NotificationChannel channel = new NotificationChannel("float_channel", "分析服务",
+                NotificationManager.IMPORTANCE_LOW);
+        getSystemService(NotificationManager.class).createNotificationChannel(channel);
     }
 
     private void showDock() {
@@ -145,15 +137,11 @@ public class FloatingService extends Service {
 
         int dockSize = (int)(56 * density);
         dockView = new TaiChiView(this);
-        
-        int layoutFlag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                : WindowManager.LayoutParams.TYPE_PHONE;
 
         dockParams = new WindowManager.LayoutParams(
                 dockSize,
                 dockSize,
-                layoutFlag,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
@@ -161,23 +149,6 @@ public class FloatingService extends Service {
         dockParams.gravity = Gravity.TOP | Gravity.LEFT;
         dockParams.x = screenWidth - dockSize - (int)(20 * density);
         dockParams.y = screenHeight / 2;
-
-        gestureDetector = new android.view.GestureDetector(this, new android.view.GestureDetector.SimpleOnGestureListener() {
-            @Override
-            public void onLongPress(MotionEvent e) {
-                isDragging = true;
-                dockView.getRootView().setAlpha(0.7f);
-            }
-
-            @Override
-            public boolean onSingleTapConfirmed(MotionEvent e) {
-                if (!isDragging) {
-                    triggerCapture();
-                }
-                return true;
-            }
-        });
-        gestureDetector.setIsLongpressEnabled(true);
 
         dockView.setOnTouchListener((v, event) -> {
             switch (event.getAction()) {
@@ -187,31 +158,29 @@ public class FloatingService extends Service {
                     dockDownY = dockParams.y;
                     dockTouchX = event.getRawX();
                     dockTouchY = event.getRawY();
-                    gestureDetector.onTouchEvent(event);
                     return true;
                 case MotionEvent.ACTION_MOVE:
+                    float dist = (float) Math.sqrt(
+                            Math.pow(event.getRawX() - dockTouchX, 2)
+                            + Math.pow(event.getRawY() - dockTouchY, 2));
+                    if (dist > 15 && !isDragging) {
+                        isDragging = true;
+                        dockView.setAlpha(0.7f);
+                    }
                     if (isDragging) {
                         float dx = event.getRawX() - dockTouchX;
                         float dy = event.getRawY() - dockTouchY;
                         dockParams.x = Math.max(0, Math.min(screenWidth - dockSize, (int)(dockDownX + dx)));
                         dockParams.y = Math.max(0, Math.min(screenHeight - dockSize, (int)(dockDownY + dy)));
                         windowManager.updateViewLayout(dockView, dockParams);
-                    } else {
-                        float dist = (float) Math.sqrt(
-                                Math.pow(event.getRawX() - dockTouchX, 2)
-                                + Math.pow(event.getRawY() - dockTouchY, 2));
-                        if (dist > 20) {
-                            isDragging = true;
-                            dockView.getRootView().setAlpha(0.7f);
-                        }
                     }
                     return true;
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
                     if (isDragging) {
-                        dockView.getRootView().setAlpha(1.0f);
+                        dockView.setAlpha(1.0f);
                     } else {
-                        gestureDetector.onTouchEvent(event);
+                        triggerCapture();
                     }
                     isDragging = false;
                     return true;
@@ -226,7 +195,6 @@ public class FloatingService extends Service {
         Intent captureIntent = new Intent("com.example.s_master.CAPTURE_NOW");
         captureIntent.setPackage(getPackageName());
         sendBroadcast(captureIntent);
-        isLoading = true;
     }
 
     private void showResultPopup(String suggestion) {
@@ -273,14 +241,10 @@ public class FloatingService extends Service {
             optionsContainer.addView(createOptionCard(styleLabel, text));
         }
 
-        int layoutFlag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                : WindowManager.LayoutParams.TYPE_PHONE;
-
         popupParams = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
-                layoutFlag,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
 
@@ -316,7 +280,6 @@ public class FloatingService extends Service {
         });
 
         windowManager.addView(popupView, popupParams);
-        popupShowing = true;
 
         autoHideHandler.postDelayed(autoHideRunnable, AUTO_HIDE_DELAY);
     }
@@ -427,7 +390,6 @@ public class FloatingService extends Service {
             } catch (Exception e) {}
             popupView = null;
         }
-        popupShowing = false;
     }
 
     @Override

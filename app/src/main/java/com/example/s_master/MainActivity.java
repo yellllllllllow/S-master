@@ -5,8 +5,6 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import android.Manifest;
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -16,7 +14,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.text.TextUtils;
 import android.util.Pair;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
@@ -36,8 +33,6 @@ import androidx.appcompat.widget.SwitchCompat;
 
 import com.google.android.material.bottomsheet.BottomSheetDialog;
 import com.google.android.material.button.MaterialButton;
-
-import android.content.res.ColorStateList;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -61,11 +56,6 @@ public class MainActivity extends AppCompatActivity {
     private MediaProjectionManager projectionManager;
     private Intent monitorServiceIntent;
     private boolean isRunning = false;
-    private boolean isManualMode = true;
-    private boolean permissionsReady = false;
-
-    private List<String> visionModels = new ArrayList<>();
-    private List<String> textModels = new ArrayList<>();
 
     private RecyclerView chatList;
     private ChatAdapter chatAdapter;
@@ -262,10 +252,22 @@ public class MainActivity extends AppCompatActivity {
         if (requestCode == REQUEST_MEDIA_PROJECTION) {
             if (resultCode == RESULT_OK && data != null) {
                 SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-                String dataStr = data.getData() != null ? data.getData().toString() : "screen_capture_granted";
+                Bundle extras = data.getExtras();
+                StringBuilder sb = new StringBuilder();
+                if (extras != null) {
+                    for (String key : extras.keySet()) {
+                        Object value = extras.get(key);
+                        if (value instanceof String) {
+                            sb.append(key).append("=").append((String) value).append(";");
+                        } else if (value instanceof Integer) {
+                            sb.append(key).append("=").append((Integer) value).append(";");
+                        }
+                    }
+                }
                 prefs.edit()
+                        .putBoolean("media_projection_granted", true)
                         .putInt("media_projection_result_code", resultCode)
-                        .putString("media_projection_result_data", dataStr)
+                        .putString("media_projection_result_data", sb.toString())
                         .apply();
 
                 monitorServiceIntent = new Intent(this, ChatMonitorService.class);
@@ -274,9 +276,7 @@ public class MainActivity extends AppCompatActivity {
                 startService(monitorServiceIntent);
 
                 if (Settings.canDrawOverlays(this)) {
-                    Intent floatIntent = new Intent(this, FloatingService.class);
-                    floatIntent.putExtra("mode", isManualMode ? "manual" : "realtime");
-                    startService(floatIntent);
+                    startService(new Intent(this, FloatingService.class));
                 }
 
                 updateUI(true);
@@ -316,15 +316,6 @@ public class MainActivity extends AppCompatActivity {
         }
         if (messages.size() > 200) {
             messages = new ArrayList<>(messages.subList(messages.size() - 200, messages.size()));
-        }
-    }
-
-    private void checkPermissionsAndAutoStart() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 104);
-            }
         }
     }
 
@@ -392,7 +383,6 @@ public class MainActivity extends AppCompatActivity {
             ArrayAdapter<String> vAdapter = new ArrayAdapter<>(this,
                     R.layout.spinner_dropdown_item, vArr);
             visionSpinner.setAdapter(vAdapter);
-            visionModels = savedVisionList;
             int idx = savedVisionModel.isEmpty() ? 0 : savedVisionList.indexOf(savedVisionModel);
             visionSpinner.setSelection(Math.max(0, idx));
         } else {
@@ -407,7 +397,6 @@ public class MainActivity extends AppCompatActivity {
             ArrayAdapter<String> tAdapter = new ArrayAdapter<>(this,
                     R.layout.spinner_dropdown_item, tArr);
             reasoningSpinner.setAdapter(tAdapter);
-            textModels = savedTextList;
             int idx = savedReasoningModel.isEmpty() ? 0 : savedTextList.indexOf(savedReasoningModel);
             reasoningSpinner.setSelection(Math.max(0, idx));
         } else {
@@ -535,9 +524,6 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public void onResult(List<String> vModels, List<String> tModels) {
                     runOnUiThread(() -> {
-                        visionModels = vModels;
-                        textModels = tModels;
-
                         aiService.saveModelLists(vModels, tModels);
 
                         String[] vArr = vModels.isEmpty() ? new String[]{"（无图形模型）"} : vModels.toArray(new String[0]);
@@ -684,20 +670,48 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startService() {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        int code = prefs.getInt("media_projection_result_code", -1);
-        String data = prefs.getString("media_projection_result_data", null);
+        if (!Settings.canDrawOverlays(this)) {
+            new AlertDialog.Builder(this)
+                    .setTitle("⚠️ 需要悬浮窗权限")
+                    .setMessage("请先授权悬浮窗权限，否则无法显示悬浮球")
+                    .setPositiveButton("前往授权", (d, w) -> {
+                        startActivityForResult(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:" + getPackageName())), REQUEST_OVERLAY_PERMISSION);
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
+            return;
+        }
 
-        if (code == -1 || data == null) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        boolean hasPermission = prefs.getBoolean("media_projection_granted", false);
+        
+        if (!hasPermission) {
             startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_MEDIA_PROJECTION);
         } else {
-            startMonitoringService(code, data);
+            startMonitoringService(prefs.getInt("media_projection_result_code", 0), 
+                                   prefs.getString("media_projection_result_data", ""));
         }
     }
 
     private void startMonitoringService(int resultCode, String resultData) {
         Intent data = new Intent();
-        data.setData(Uri.parse(resultData));
+        if (resultData != null && !resultData.isEmpty()) {
+            String[] pairs = resultData.split(";");
+            for (String pair : pairs) {
+                int eqIdx = pair.indexOf("=");
+                if (eqIdx > 0) {
+                    String key = pair.substring(0, eqIdx);
+                    String value = pair.substring(eqIdx + 1);
+                    try {
+                        int intValue = Integer.parseInt(value);
+                        data.putExtra(key, intValue);
+                    } catch (NumberFormatException e) {
+                        data.putExtra(key, value);
+                    }
+                }
+            }
+        }
 
         monitorServiceIntent = new Intent(this, ChatMonitorService.class);
         monitorServiceIntent.putExtra("resultCode", resultCode);
@@ -705,9 +719,7 @@ public class MainActivity extends AppCompatActivity {
         startService(monitorServiceIntent);
 
         if (Settings.canDrawOverlays(this)) {
-            Intent floatIntent = new Intent(this, FloatingService.class);
-            floatIntent.putExtra("mode", isManualMode ? "manual" : "realtime");
-            startService(floatIntent);
+            startService(new Intent(this, FloatingService.class));
         }
 
         updateUI(true);
@@ -719,10 +731,10 @@ public class MainActivity extends AppCompatActivity {
 
     private void stopService() {
         if (monitorServiceIntent != null) {
-            stopService(monitorServiceIntent);
+            super.stopService(monitorServiceIntent);
             monitorServiceIntent = null;
         }
-        stopService(new Intent(this, FloatingService.class));
+        super.stopService(new Intent(this, FloatingService.class));
         updateUI(false);
         saveRunningState(false);
         Toast.makeText(this, "🛑 服务已停止", Toast.LENGTH_SHORT).show();

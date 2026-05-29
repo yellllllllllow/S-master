@@ -106,9 +106,7 @@ public class ChatMonitorService extends Service {
     }
 
     private Notification createNotification() {
-        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this);
+        Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID);
 
         boolean hasResult = !lastResultText.isEmpty();
 
