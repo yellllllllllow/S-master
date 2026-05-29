@@ -1,416 +1,461 @@
 package com.example.s_master;
 
+import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.BroadcastReceiver;
-import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
-import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
+import android.os.Build;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
+import android.util.Base64;
 import android.util.DisplayMetrics;
-import android.util.TypedValue;
+import android.util.Log;
+import android.content.IntentFilter;
 import android.view.Gravity;
-import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.widget.Button;
-import android.widget.LinearLayout;
-import android.widget.TextView;
+import android.widget.ImageView;
 import android.widget.Toast;
 
-import java.util.ArrayList;
-import java.util.List;
+import androidx.annotation.Nullable;
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
+
+import com.example.s_master.ai.VisionAnalyzer;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class FloatingService extends Service {
 
-    private static final long AUTO_HIDE_DELAY = 30000;
+    private static final String TAG = "FloatingService";
+    private static final String CHANNEL_ID = "S_master_channel";
+    private static final String CHANNEL_NAME = "S-master Service";
+    private static final int NOTIFICATION_ID = 1001;
 
     private WindowManager windowManager;
-    private LayoutInflater inflater;
-    private int screenWidth;
-    private int screenHeight;
-    private float density;
+    private View floatingView;
+    private MediaProjection mediaProjection;
+    private VirtualDisplay virtualDisplay;
+    private ImageReader imageReader;
+    private HandlerThread backgroundThread;
+    private Handler backgroundHandler;
+    private ExecutorService executor;
 
-    private LinearLayout popupView;
-    private WindowManager.LayoutParams popupParams;
-    
-    private View dockView;
-    private WindowManager.LayoutParams dockParams;
-    private float dockDownX, dockDownY;
-    private float dockTouchX, dockTouchY;
+    private WindowManager.LayoutParams params;
     private boolean isDragging = false;
+    private float touchStartX, touchStartY;
+    private int initialX, initialY;
 
-    private float popupDownX, popupDownY;
-    private float popupTouchX, popupTouchY;
-    private String lastSuggestion = "";
-    private Handler autoHideHandler = new Handler();
-    private Runnable autoHideRunnable = this::hideResultPopup;
+    private volatile boolean isAnalyzing = false;
+    private MediaProjection.Callback projectionCallback;
 
-    private BroadcastReceiver suggestionReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            if ("com.example.s_master.SUGGESTION".equals(intent.getAction())) {
-                String suggestion = intent.getStringExtra("suggestion");
-                if (suggestion != null) {
-                    lastSuggestion = suggestion;
+    private static final String ACTION_STOP = "com.example.s_master.STOP";
+    private static final String ACTION_OPEN = "com.example.s_master.OPEN";
 
-                    boolean silentMode = getSharedPreferences("S_masterPrefs", MODE_PRIVATE)
-                            .getBoolean("silent_mode", false);
-
-                    if (silentMode) {
-                        String copyText = extractSuggestion(suggestion);
-                        if (!copyText.isEmpty()) {
-                            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                            clipboard.setPrimaryClip(ClipData.newPlainText("suggestion", copyText));
-                        }
-                        Toast.makeText(FloatingService.this, "🔇 已静默复制到剪贴板", Toast.LENGTH_SHORT).show();
-                    } else {
-                        showResultPopup(suggestion);
-                    }
-                }
-            }
-        }
-    };
-
+    @Nullable
     @Override
     public IBinder onBind(Intent intent) {
         return null;
     }
 
     @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        return START_STICKY;
+    public void onCreate() {
+        super.onCreate();
+        executor = Executors.newSingleThreadExecutor();
+        createNotificationChannel();
+        startForeground(NOTIFICATION_ID, createNotification());
+        initFloatingButton();
     }
 
     @Override
-    public void onCreate() {
-        super.onCreate();
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null) {
+            if (ACTION_STOP.equals(intent.getAction())) {
+                stopSelf();
+                return START_STICKY;
+            }
 
-        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
-        inflater = (LayoutInflater) getSystemService(LAYOUT_INFLATER_SERVICE);
+            if (intent.hasExtra("resultCode") && intent.hasExtra("resultData")) {
+                int resultCode = intent.getIntExtra("resultCode", -1);
+                Intent data = intent.getParcelableExtra("resultData");
+                if (resultCode != -1 && data != null) {
+                    setupMediaProjection(resultCode, data);
+                }
+            }
+        }
 
-        DisplayMetrics metrics = new DisplayMetrics();
-        windowManager.getDefaultDisplay().getRealMetrics(metrics);
-        screenWidth = metrics.widthPixels;
-        screenHeight = metrics.heightPixels;
-        density = metrics.density;
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(ACTION_STOP);
+        filter.addAction(ACTION_OPEN);
+        registerReceiver(receiver, filter);
 
-        createNotificationChannel();
-        Intent openIntent = new Intent(this, MainActivity.class);
-        openIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, openIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Notification notification = new Notification.Builder(this, "float_channel")
-                .setContentTitle("S master")
-                .setContentText("分析服务运行中")
-                .setSmallIcon(android.R.drawable.ic_menu_compass)
-                .setOngoing(true)
-                .setContentIntent(pendingIntent)
-                .build();
-        startForeground(2, notification);
-
-        registerReceiver(suggestionReceiver,
-                new IntentFilter("com.example.s_master.SUGGESTION"),
-                Context.RECEIVER_NOT_EXPORTED);
-
-        showDock();
+        return START_STICKY;
     }
 
     private void createNotificationChannel() {
-        NotificationChannel channel = new NotificationChannel("float_channel", "分析服务",
-                NotificationManager.IMPORTANCE_LOW);
-        getSystemService(NotificationManager.class).createNotificationChannel(channel);
+        NotificationChannel channel = new NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW);
+        channel.setDescription("S-master 悬浮窗服务");
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        nm.createNotificationChannel(channel);
     }
 
-    private void showDock() {
-        if (dockView != null) {
-            try {
-                windowManager.removeView(dockView);
-            } catch (Exception e) {}
-        }
+    private Notification createNotification() {
+        Intent openIntent = new Intent(this, MainActivity.class);
+        openIntent.setAction(ACTION_OPEN);
+        PendingIntent openPending = PendingIntent.getActivity(this, 0, openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        final int dockSize = (int)(56 * density);
-        dockView = new TaiChiView(this);
+        Intent stopIntent = new Intent(this, FloatingService.class);
+        stopIntent.setAction(ACTION_STOP);
+        PendingIntent stopPending = PendingIntent.getService(this, 0, stopIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        dockParams = new WindowManager.LayoutParams(
-                dockSize,
-                dockSize,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.TRANSLUCENT);
-
-        dockParams.gravity = Gravity.TOP | Gravity.LEFT;
-        dockParams.x = screenWidth - dockSize - (int)(20 * density);
-        dockParams.y = screenHeight / 2;
-
-        dockView.setOnTouchListener((v, event) -> {
-            switch (event.getAction()) {
-                case MotionEvent.ACTION_DOWN:
-                    isDragging = false;
-                    dockDownX = dockParams.x;
-                    dockDownY = dockParams.y;
-                    dockTouchX = event.getRawX();
-                    dockTouchY = event.getRawY();
-                    return true;
-                case MotionEvent.ACTION_MOVE:
-                    float dist = (float) Math.sqrt(
-                            Math.pow(event.getRawX() - dockTouchX, 2)
-                            + Math.pow(event.getRawY() - dockTouchY, 2));
-                    if (dist > 15 && !isDragging) {
-                        isDragging = true;
-                        dockView.setAlpha(0.7f);
-                    }
-                    if (isDragging) {
-                        float dx = event.getRawX() - dockTouchX;
-                        float dy = event.getRawY() - dockTouchY;
-                        dockParams.x = Math.max(0, Math.min(screenWidth - dockSize, (int)(dockDownX + dx)));
-                        dockParams.y = Math.max(0, Math.min(screenHeight - dockSize, (int)(dockDownY + dy)));
-                        windowManager.updateViewLayout(dockView, dockParams);
-                    }
-                    return true;
-                case MotionEvent.ACTION_UP:
-                case MotionEvent.ACTION_CANCEL:
-                    if (isDragging) {
-                        dockView.setAlpha(1.0f);
-                    } else {
-                        triggerCapture();
-                    }
-                    isDragging = false;
-                    return true;
-            }
-            return false;
-        });
-
-        windowManager.addView(dockView, dockParams);
+        return new Notification.Builder(this, CHANNEL_ID)
+                .setContentTitle("S-master")
+                .setContentText("悬浮球已就绪，点击截屏分析")
+                .setSmallIcon(R.drawable.ic_notification)
+                .setPriority(Notification.PRIORITY_LOW)
+                .setOngoing(true)
+                .setContentIntent(openPending)
+                .addAction(R.drawable.ic_notification, "停止", stopPending)
+                .build();
     }
 
-    private void triggerCapture() {
-        Intent captureIntent = new Intent("com.example.s_master.CAPTURE_NOW");
-        captureIntent.setPackage(getPackageName());
-        sendBroadcast(captureIntent);
-    }
+    @SuppressLint("ClickableViewAccessibility")
+    private void initFloatingButton() {
+        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        floatingView = View.inflate(this, R.layout.floating_button, null);
 
-    private void showResultPopup(String suggestion) {
-        autoHideHandler.removeCallbacks(autoHideRunnable);
-
-        if (popupView != null) {
-            try {
-                windowManager.removeView(popupView);
-            } catch (Exception e) {}
-            popupView = null;
-        }
-
-        popupView = (LinearLayout) inflater.inflate(R.layout.result_overlay, null);
-        TextView popupClose = popupView.findViewById(R.id.popup_close);
-        TextView popupAnalysis = popupView.findViewById(R.id.popup_analysis);
-        LinearLayout analysisSection = popupView.findViewById(R.id.analysis_section);
-        LinearLayout optionsContainer = popupView.findViewById(R.id.options_container);
-
-        List<String[]> suggestions = parseSuggestion(suggestion);
-
-        String analysis = suggestions.isEmpty() ? "" : suggestions.get(0)[2];
-        if (!analysis.isEmpty()) {
-            popupAnalysis.setText(analysis);
-            analysisSection.setVisibility(View.VISIBLE);
-        }
-
-        int emojis[] = {0x1F60A, 0x1F604, 0x1F525};
-        String stylePrefixes[] = {"温柔", "幽默", "直球"};
-
-        for (int i = 1; i < suggestions.size(); i++) {
-            String[] item = suggestions.get(i);
-            String style = item[0];
-            String text = item[1];
-
-            int matchedIdx = -1;
-            for (int j = 0; j < stylePrefixes.length; j++) {
-                if (style.contains(stylePrefixes[j])) { matchedIdx = j; break; }
-            }
-
-            String styleLabel = matchedIdx >= 0
-                    ? new String(Character.toChars(emojis[matchedIdx])) + " " + stylePrefixes[matchedIdx] + "风格"
-                    : "💡 " + style;
-
-            optionsContainer.addView(createOptionCard(styleLabel, text));
-        }
-
-        popupParams = new WindowManager.LayoutParams(
+        params = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT);
+                PixelFormat.TRANSLUCENT
+        );
 
-        popupParams.gravity = Gravity.TOP | Gravity.LEFT;
+        params.gravity = Gravity.TOP | Gravity.START;
+        params.x = 100;
+        params.y = 300;
 
-        popupView.measure(
-                View.MeasureSpec.makeMeasureSpec(screenWidth, View.MeasureSpec.AT_MOST),
-                View.MeasureSpec.makeMeasureSpec(screenHeight, View.MeasureSpec.AT_MOST));
-        int popupW = popupView.getMeasuredWidth();
-
-        popupParams.x = Math.max(0, Math.min(screenWidth - popupW, dockParams.x + (int)(56 * density / 2) - popupW / 2));
-        popupParams.y = Math.max(0, Math.min(screenHeight - popupView.getMeasuredHeight(), dockParams.y - popupView.getMeasuredHeight() / 2));
-
-        popupClose.setOnClickListener(v -> hideResultPopup());
-
-        popupView.setOnTouchListener((v, event) -> {
+        ImageView btn = floatingView.findViewById(R.id.floatingBtn);
+        btn.setOnTouchListener((v, event) -> {
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
-                    popupDownX = popupParams.x;
-                    popupDownY = popupParams.y;
-                    popupTouchX = event.getRawX();
-                    popupTouchY = event.getRawY();
+                    isDragging = false;
+                    touchStartX = event.getRawX();
+                    touchStartY = event.getRawY();
+                    initialX = params.x;
+                    initialY = params.y;
                     return true;
+
                 case MotionEvent.ACTION_MOVE:
-                    float dx = event.getRawX() - popupTouchX;
-                    float dy = event.getRawY() - popupTouchY;
-                    popupParams.x = (int) (popupDownX + dx);
-                    popupParams.y = (int) (popupDownY + dy);
-                    windowManager.updateViewLayout(popupView, popupParams);
+                    float deltaX = event.getRawX() - touchStartX;
+                    float deltaY = event.getRawY() - touchStartY;
+
+                    if (Math.abs(deltaX) > 10 || Math.abs(deltaY) > 10) {
+                        isDragging = true;
+                    }
+
+                    if (isDragging) {
+                        params.x = initialX + (int) deltaX;
+                        params.y = initialY + (int) deltaY;
+                        windowManager.updateViewLayout(floatingView, params);
+                    }
+                    return true;
+
+                case MotionEvent.ACTION_UP:
+                    if (!isDragging) {
+                        onFloatingClick();
+                    }
                     return true;
             }
             return false;
         });
 
-        windowManager.addView(popupView, popupParams);
-
-        autoHideHandler.postDelayed(autoHideRunnable, AUTO_HIDE_DELAY);
+        windowManager.addView(floatingView, params);
     }
 
-    private View createOptionCard(String label, String text) {
-        int dp8 = (int)(8 * density);
-        int dp12 = (int)(12 * density);
-        int accentColor = androidx.core.content.ContextCompat.getColor(this, R.color.purple_500);
-        int textColor = androidx.core.content.ContextCompat.getColor(this, R.color.text_primary);
+    private void onFloatingClick() {
+        if (isAnalyzing) {
+            Toast.makeText(this, "正在分析中...", Toast.LENGTH_SHORT).show();
+            return;
+        }
 
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp12, dp12, dp12, dp12);
-        card.setBackgroundResource(R.drawable.option_card_bg);
+        if (mediaProjection == null) {
+            Toast.makeText(this, "屏幕投影未就绪，请重启服务", Toast.LENGTH_SHORT).show();
+            return;
+        }
 
-        LinearLayout.LayoutParams margin = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        margin.bottomMargin = dp8;
-        card.setLayoutParams(margin);
-
-        TextView labelView = new TextView(this);
-        labelView.setText(label);
-        labelView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        labelView.setTextColor(accentColor);
-        labelView.setTypeface(null, Typeface.BOLD);
-
-        TextView textView = new TextView(this);
-        textView.setText(text);
-        textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        textView.setTextColor(textColor);
-        textView.setLineSpacing(0, 1.2f);
-        textView.setPadding(0, dp8, 0, dp12);
-
-        Button copyBtn = new Button(this);
-        copyBtn.setText("📋 复制此条");
-        copyBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        copyBtn.setAllCaps(false);
-        copyBtn.setTextColor(androidx.core.content.ContextCompat.getColor(this, R.color.white));
-
-        GradientDrawable btnBg = new GradientDrawable();
-        btnBg.setCornerRadius(dp8);
-        btnBg.setColors(new int[]{accentColor, androidx.core.content.ContextCompat.getColor(this, R.color.purple_700)});
-        btnBg.setGradientType(GradientDrawable.LINEAR_GRADIENT);
-        btnBg.setOrientation(GradientDrawable.Orientation.LEFT_RIGHT);
-        copyBtn.setBackground(btnBg);
-
-        LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, (int)(36 * density));
-        copyBtn.setLayoutParams(btnLp);
-
-        copyBtn.setOnClickListener(v -> {
-            android.content.ClipboardManager clipboard =
-                    (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("suggestion", text));
-            android.widget.Toast.makeText(FloatingService.this,
-                    "✅ 已复制：「" + label + "」", android.widget.Toast.LENGTH_SHORT).show();
-            hideResultPopup();
-        });
-
-        card.addView(labelView);
-        card.addView(textView);
-        card.addView(copyBtn);
-        return card;
+        takeScreenshot();
     }
 
-    private List<String[]> parseSuggestion(String raw) {
-        List<String[]> result = new ArrayList<>();
+    private void setupMediaProjection(int resultCode, Intent data) {
+        try {
+            MediaProjectionManager pm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+            mediaProjection = pm.getMediaProjection(resultCode, data);
 
-        String[] parts = raw.split("\\|\\|\\|");
-        if (parts.length >= 3) {
-            result.add(new String[]{"分析", "", parts[0]});
-            for (int i = 1; i + 1 < parts.length; i += 2) {
-                String style = parts[i].trim();
-                String text = parts[i + 1].trim();
-                if (!text.isEmpty()) {
-                    result.add(new String[]{style, text, ""});
+            if (mediaProjection == null) {
+                Log.e(TAG, "MediaProjection is null");
+                return;
+            }
+
+            projectionCallback = new MediaProjection.Callback() {
+                @Override
+                public void onStop() {
+                    Log.w(TAG, "MediaProjection stopped by system");
+                    stopSelf();
                 }
-            }
-        } else if (parts.length == 1) {
-            result.add(new String[]{"分析", "", ""});
-            result.add(new String[]{"默认", parts[0], ""});
-        }
+            };
+            mediaProjection.registerCallback(projectionCallback, null);
 
-        if (result.size() <= 1) {
-            result.add(new String[]{"默认", raw, ""});
-        }
+            DisplayMetrics metrics = getResources().getDisplayMetrics();
+            int width = metrics.widthPixels;
+            int height = metrics.heightPixels;
+            int density = metrics.densityDpi;
 
-        return result;
+            backgroundThread = new HandlerThread("ScreenshotWorker");
+            backgroundThread.start();
+            backgroundHandler = new Handler(backgroundThread.getLooper());
+
+            imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
+
+            virtualDisplay = mediaProjection.createVirtualDisplay(
+                    "S_master_capture",
+                    width, height, density,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    imageReader.getSurface(),
+                    null,
+                    backgroundHandler
+            );
+
+            imageReader.setOnImageAvailableListener(reader -> {
+                if (!isAnalyzing) {
+                    isAnalyzing = true;
+                    Image image = null;
+                    try {
+                        image = reader.acquireLatestImage();
+                        if (image != null) {
+                            Bitmap bitmap = imageToBitmap(image);
+                            if (bitmap != null) {
+                                analyzeImage(bitmap);
+                            }
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Screenshot error", e);
+                        isAnalyzing = false;
+                    } finally {
+                        if (image != null) {
+                            try { image.close(); } catch (Exception ignored) {}
+                        }
+                    }
+                }
+            }, backgroundHandler);
+
+            Log.d(TAG, "MediaProjection setup complete");
+
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to setup MediaProjection", e);
+            Toast.makeText(this, "屏幕投影初始化失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        }
     }
 
-    private String extractSuggestion(String text) {
-        if (text == null || text.isEmpty()) return "";
-        String[] parts = text.split("\\|\\|\\|");
-        if (parts.length >= 3) {
-            for (int i = 1; i + 1 < parts.length; i += 2) {
-                String t = parts[i + 1].trim();
-                if (!t.isEmpty()) return t;
-            }
+    private Bitmap imageToBitmap(Image image) {
+        try {
+            Image.Plane[] planes = image.getPlanes();
+            ByteBuffer buffer = planes[0].getBuffer();
+            int width = image.getWidth();
+            int height = image.getHeight();
+            int pixelStride = planes[0].getPixelStride();
+            int rowStride = planes[0].getRowStride();
+            int rowPadding = rowStride - pixelStride * width;
+
+            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            bitmap.copyPixelsFromBuffer(buffer);
+            return bitmap;
+
+        } catch (Exception e) {
+            Log.e(TAG, "Image to bitmap error", e);
+            return null;
         }
-        return text;
     }
 
-    private void hideResultPopup() {
-        autoHideHandler.removeCallbacks(autoHideRunnable);
-        if (popupView != null) {
+    private void takeScreenshot() {
+        if (imageReader == null) {
+            Toast.makeText(this, "截图服务未就绪", Toast.LENGTH_SHORT).show();
+            isAnalyzing = false;
+            return;
+        }
+
+        Toast.makeText(this, "正在截取屏幕...", Toast.LENGTH_SHORT).show();
+    }
+
+    private void analyzeImage(Bitmap bitmap) {
+        executor.execute(() -> {
             try {
-                windowManager.removeView(popupView);
-            } catch (Exception e) {}
-            popupView = null;
-        }
+                updateNotification("正在分析截屏...");
+
+                String base64Image = bitmapToBase64(bitmap);
+
+                VisionAnalyzer.analyze(
+                        base64Image,
+                        MainActivity.currentApiUrl,
+                        MainActivity.currentApiKey,
+                        MainActivity.currentModel,
+                        MainActivity.currentPrompt,
+                        new VisionAnalyzer.AnalyzeCallback() {
+                            @Override
+                            public void onSuccess(String result) {
+                                isAnalyzing = false;
+
+                                if (MainActivity.isSilentMode) {
+                                    copyToClipboard(result);
+                                    updateNotification("分析完成，已复制到剪贴板");
+                                } else {
+                                    showResultNotification(result);
+                                }
+
+                                bitmap.recycle();
+                            }
+
+                            @Override
+                            public void onError(String error) {
+                                isAnalyzing = false;
+                                updateNotification("分析失败: " + error);
+                                Toast.makeText(FloatingService.this, "分析失败: " + error, Toast.LENGTH_LONG).show();
+                                bitmap.recycle();
+                            }
+                        }
+                );
+
+            } catch (Exception e) {
+                isAnalyzing = false;
+                Log.e(TAG, "Analysis error", e);
+                updateNotification("分析失败: " + e.getMessage());
+                bitmap.recycle();
+            }
+        });
     }
+
+    private String bitmapToBase64(Bitmap bitmap) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, baos);
+        byte[] imageBytes = baos.toByteArray();
+        return Base64.encodeToString(imageBytes, Base64.NO_WRAP);
+    }
+
+    private void showResultNotification(String result) {
+        String displayText = result.length() > 200 ? result.substring(0, 200) + "..." : result;
+
+        Intent openIntent = new Intent(this, MainActivity.class);
+        openIntent.setAction(ACTION_OPEN);
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("📸 截图分析结果")
+                .setContentText(displayText)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(displayText))
+                .setSmallIcon(R.drawable.ic_notification)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .addAction(R.drawable.ic_notification, "复制结果", PendingIntent.getActivity(
+                        this, 1,
+                        new Intent(this, MainActivity.class).setAction("COPY").putExtra("result", result),
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE))
+                .build();
+
+        NotificationManagerCompat.from(this).notify(NOTIFICATION_ID + 1, notification);
+    }
+
+    private void updateNotification(String text) {
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        Notification notification = new Notification.Builder(this, CHANNEL_ID)
+                .setContentTitle("S-master")
+                .setContentText(text)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setPriority(Notification.PRIORITY_LOW)
+                .setOngoing(true)
+                .build();
+        nm.notify(NOTIFICATION_ID, notification);
+    }
+
+    private void copyToClipboard(String text) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        android.content.ClipData clip = android.content.ClipData.newPlainText("AI 分析结果", text);
+        clipboard.setPrimaryClip(clip);
+    }
+
+    private final android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+                stopSelf();
+            }
+        }
+    };
 
     @Override
     public void onDestroy() {
         super.onDestroy();
-        autoHideHandler.removeCallbacks(autoHideRunnable);
-        try {
-            unregisterReceiver(suggestionReceiver);
-        } catch (Exception e) {}
-        hideResultPopup();
-        if (dockView != null) {
+
+        if (floatingView != null && windowManager != null) {
             try {
-                windowManager.removeView(dockView);
-            } catch (Exception e) {}
-            dockView = null;
+                windowManager.removeView(floatingView);
+            } catch (Exception ignored) {}
         }
+
+        if (mediaProjection != null) {
+            try {
+                mediaProjection.unregisterCallback(projectionCallback);
+                mediaProjection.stop();
+            } catch (Exception ignored) {}
+        }
+
+        if (virtualDisplay != null) {
+            try {
+                virtualDisplay.release();
+            } catch (Exception ignored) {}
+        }
+
+        if (imageReader != null) {
+            try {
+                imageReader.close();
+            } catch (Exception ignored) {}
+        }
+
+        if (backgroundThread != null) {
+            backgroundThread.quitSafely();
+        }
+
+        if (executor != null) {
+            executor.shutdown();
+        }
+
+        try {
+            unregisterReceiver(receiver);
+        } catch (Exception ignored) {}
+
+        MainActivity.isServiceRunning = false;
     }
 }
