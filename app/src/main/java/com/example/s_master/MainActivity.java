@@ -1,25 +1,28 @@
 package com.example.s_master;
 
 import android.Manifest;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
 import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.util.Base64;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.View;
 import android.widget.Button;
-import android.widget.EditText;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.appcompat.app.ActionBar;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.widget.Toolbar;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
@@ -29,14 +32,10 @@ import com.google.android.material.textfield.TextInputEditText;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import android.util.Log;
-import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.Arrays;
+import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -49,6 +48,8 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_AUTO_START = "auto_start";
     private static final String KEY_MEDIA_PROJECTION_RESULT_CODE = "mp_result_code";
     private static final String KEY_MEDIA_PROJECTION_DATA = "mp_result_data";
+    private static final String KEY_FLOATING_X = "floating_x";
+    private static final String KEY_FLOATING_Y = "floating_y";
 
     private static final int REQUEST_OVERLAY_PERMISSION = 101;
     private static final int REQUEST_MEDIA_PROJECTION = 102;
@@ -76,11 +77,47 @@ public class MainActivity extends AppCompatActivity {
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         mediaProjectionManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
 
+        setupToolbar();
         initViews();
         loadSettings();
         updateServiceStatus();
-
         checkPermissions();
+
+        handleCopyAction();
+    }
+
+    private void setupToolbar() {
+        Toolbar toolbar = findViewById(R.id.toolbar);
+        setSupportActionBar(toolbar);
+        ActionBar actionBar = getSupportActionBar();
+        if (actionBar != null) {
+            actionBar.setTitle("S-master AI");
+            actionBar.setSubtitle("截图分析助手");
+        }
+    }
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.main_menu, menu);
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        int id = item.getItemId();
+        
+        if (id == R.id.action_clear_mp_cache) {
+            clearMediaProjectionCache();
+            return true;
+        } else if (id == R.id.action_reset_settings) {
+            resetAllSettings();
+            return true;
+        } else if (id == R.id.action_about) {
+            showAboutDialog();
+            return true;
+        }
+        
+        return super.onOptionsItemSelected(item);
     }
 
     private void initViews() {
@@ -167,21 +204,25 @@ public class MainActivity extends AppCompatActivity {
 
         apiUrlInput.setText(prefs.getString(KEY_API_URL, ""));
         apiKeyInput.setText(prefs.getString(KEY_API_KEY, ""));
-        modelInput.setText(prefs.getString(KEY_MODEL, ""));
+        modelInput.setText(prefs.getString(KEY_MODEL, "gpt-4o-mini"));
 
         new AlertDialog.Builder(this)
                 .setTitle("API 设置")
                 .setView(dialogView)
                 .setPositiveButton("保存", (dialog, which) -> {
+                    String url = apiUrlInput.getText().toString().trim();
+                    String key = apiKeyInput.getText().toString().trim();
+                    String model = modelInput.getText().toString().trim();
+
                     prefs.edit()
-                            .putString(KEY_API_URL, apiUrlInput.getText().toString().trim())
-                            .putString(KEY_API_KEY, apiKeyInput.getText().toString().trim())
-                            .putString(KEY_MODEL, modelInput.getText().toString().trim())
+                            .putString(KEY_API_URL, url)
+                            .putString(KEY_API_KEY, key)
+                            .putString(KEY_MODEL, model.isEmpty() ? "gpt-4o-mini" : model)
                             .apply();
 
-                    currentApiUrl = apiUrlInput.getText().toString().trim();
-                    currentApiKey = apiKeyInput.getText().toString().trim();
-                    currentModel = modelInput.getText().toString().trim();
+                    currentApiUrl = url;
+                    currentApiKey = key;
+                    currentModel = model.isEmpty() ? "gpt-4o-mini" : model;
 
                     Toast.makeText(this, "设置已保存", Toast.LENGTH_SHORT).show();
                 })
@@ -220,6 +261,73 @@ public class MainActivity extends AppCompatActivity {
         });
 
         dialog.show();
+    }
+
+    private void clearMediaProjectionCache() {
+        new AlertDialog.Builder(this)
+                .setTitle("清除授权缓存")
+                .setMessage("确定要清除屏幕录制授权缓存吗？下次启动服务时将重新请求授权。")
+                .setPositiveButton("确定", (dialog, which) -> {
+                    prefs.edit()
+                            .remove(KEY_MEDIA_PROJECTION_RESULT_CODE)
+                            .remove(KEY_MEDIA_PROJECTION_DATA)
+                            .apply();
+                    Toast.makeText(this, "授权缓存已清除", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void resetAllSettings() {
+        new AlertDialog.Builder(this)
+                .setTitle("重置所有设置")
+                .setMessage("确定要重置所有设置吗？这将清除 API 配置、授权缓存和悬浮球位置。")
+                .setPositiveButton("确定", (dialog, which) -> {
+                    List<String> keysToRemove = Arrays.asList(
+                        KEY_API_URL, KEY_API_KEY, KEY_MODEL, KEY_CUSTOM_PROMPT,
+                        KEY_SILENT_MODE, KEY_MEDIA_PROJECTION_RESULT_CODE,
+                        KEY_MEDIA_PROJECTION_DATA, KEY_FLOATING_X, KEY_FLOATING_Y
+                    );
+                    
+                    SharedPreferences.Editor editor = prefs.edit();
+                    for (String key : keysToRemove) {
+                        editor.remove(key);
+                    }
+                    editor.apply();
+
+                    loadSettings();
+                    updateServiceStatus();
+                    Toast.makeText(this, "所有设置已重置", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void showAboutDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("关于 S-master AI")
+                .setMessage("S-master AI 是一款智能截图分析助手，可以快速截取屏幕并通过 AI 分析问题。\n\n" +
+                           "主要功能：\n" +
+                           "• 悬浮球快速截屏\n" +
+                           "• AI 图像分析\n" +
+                           "• 自定义 Prompt\n" +
+                           "• 静默模式（结果自动复制）\n\n" +
+                           "版本: 1.0.0")
+                .setPositiveButton("确定", null)
+                .show();
+    }
+
+    private void handleCopyAction() {
+        Intent intent = getIntent();
+        if (intent != null && "COPY".equals(intent.getAction())) {
+            String result = intent.getStringExtra("result");
+            if (result != null && !result.isEmpty()) {
+                ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                android.content.ClipData clip = android.content.ClipData.newPlainText("AI 分析结果", result);
+                clipboard.setPrimaryClip(clip);
+                Toast.makeText(this, "结果已复制到剪贴板", Toast.LENGTH_SHORT).show();
+            }
+        }
     }
 
     private void startFloatingService() {
@@ -262,7 +370,7 @@ public class MainActivity extends AppCompatActivity {
                 return (Intent) ois.readObject();
             }
         } catch (Exception e) {
-            Log.e("MainActivity", "Failed to get saved MediaProjection data", e);
+            android.util.Log.e("MainActivity", "Failed to get saved MediaProjection data", e);
         }
         return null;
     }
@@ -279,7 +387,7 @@ public class MainActivity extends AppCompatActivity {
                     .putString(KEY_MEDIA_PROJECTION_DATA, dataStr)
                     .apply();
         } catch (Exception e) {
-            Log.e("MainActivity", "Failed to save MediaProjection data", e);
+            android.util.Log.e("MainActivity", "Failed to save MediaProjection data", e);
         }
     }
 
@@ -326,12 +434,9 @@ public class MainActivity extends AppCompatActivity {
             if (resultCode == RESULT_OK && data != null) {
                 saveMediaProjectionData(resultCode, data);
                 
-                int resultCodeFinal = resultCode;
-                Intent dataFinal = data;
-
                 Intent serviceIntent = new Intent(this, FloatingService.class);
-                serviceIntent.putExtra("resultCode", resultCodeFinal);
-                serviceIntent.putExtra("resultData", dataFinal);
+                serviceIntent.putExtra("resultCode", resultCode);
+                serviceIntent.putExtra("resultData", data);
                 ContextCompat.startForegroundService(this, serviceIntent);
 
                 isServiceRunning = true;
